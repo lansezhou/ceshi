@@ -18,7 +18,12 @@
 
 ## 配置说明
 MONGODB_URI =  数据库地址
+
 BOT_TOKEN = TG机器人token
+
 ALLOWED_TG_IDS = TG id  白名单用的
+
 USE_PROXY = false  默认代理关闭
+
 /logs:/usr/src/app/logs   日志映射
+
