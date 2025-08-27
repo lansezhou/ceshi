@@ -363,3 +363,4 @@ bot.on('text', async ctx => {
 bot.launch().then(() => log('✅ Bot 已启动'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
