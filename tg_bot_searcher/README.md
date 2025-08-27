@@ -12,10 +12,13 @@
 
 ## 部署步骤
 
-1. 修改 `.env` 文件中的配置
-2. 构建Docker镜像：`docker build -t tg-bot-searcher .`
-3. 运行容器：`docker run -d --name tg-bot-searcher tg-bot-searcher`
+
+ 构建Docker镜像：`docker build -t tg-bot-searcher .`
+ 运行容器：`docker run -d --name tg-bot-searcher tg-bot-searcher`
 
 ## 配置说明
-
-详见 `.env` 文件注释。
+MONGODB_URI =  数据库地址
+BOT_TOKEN = TG机器人token
+ALLOWED_TG_IDS = TG id  白名单用的
+USE_PROXY = false  默认代理关闭
+/logs:/usr/src/app/logs   日志映射
