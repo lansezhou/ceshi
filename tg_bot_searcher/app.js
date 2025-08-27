@@ -359,8 +359,159 @@ bot.on('text', async ctx => {
   }
 });
 
+// ========== 多关键词模糊搜索 + 分页列表功能 ==========
+const { nanoid } = require('nanoid'); // 用于生成唯一 sessionId
+const searchSessions = new Map(); // 存储用户搜索会话，便于分页和查看详情
+const PAGE_SIZE = 5;
+
+bot.command('fuzzy', async ctx => {
+  const userId = ctx.from.id;
+  if (!isAllowed(userId)) return ctx.reply('❌ 无权限');
+
+  const keyword = ctx.message.text.replace('/fuzzy', '').trim();
+  if (!keyword) return ctx.reply('用法: /fuzzy <关键词>, 支持空格分隔多个关键词');
+
+  try {
+    await connectDB();
+    ctx.sendChatAction('typing');
+
+    const keywords = keyword.split(/\s+/).filter(Boolean);
+    const regexConditions = keywords.map(k => ({ title: { $regex: k, $options: 'i' } }));
+
+    const collections = await getAllCollections();
+    let results = [];
+    for (const name of collections) {
+      try {
+        const docs = await db.collection(name)
+          .find({ $and: regexConditions })
+          .toArray();
+        results.push(...docs.map(doc => ({ doc, name })));
+      } catch (err) {
+        logErr(`❌ 搜索集合 ${name} 出错:`, err.message);
+      }
+    }
+
+    if (!results.length) return ctx.reply('❌ 未找到匹配结果');
+
+    // 如果结果 <=5，直接显示详情
+    if (results.length <= PAGE_SIZE) {
+      for (const { doc, name } of results) {
+        const message = buildMessage(doc, name);
+        const imageUrl = doc.img?.[0] || doc.cover || await getCoverWithCache(doc.number);
+        if (imageUrl) await sendPhotoFromUrl(ctx, imageUrl, message);
+        else await ctx.reply(message, { parse_mode: 'HTML' });
+      }
+      return;
+    }
+
+    // 结果 >5，分页显示标题列表
+    const sessionId = nanoid();
+    searchSessions.set(sessionId, { results, page: 1 });
+
+    const buildPage = (session) => {
+      const start = (session.page - 1) * PAGE_SIZE;
+      const pageItems = session.results.slice(start, start + PAGE_SIZE);
+      let text = `ℹ️ 共 ${session.results.length} 条结果，当前第 ${session.page} 页\n\n`;
+      pageItems.forEach((item, i) => {
+        const number = item.doc.number || 'N/A';
+        const title = item.doc.title || 'N/A';
+        text += `${i + 1}. ${title} (${number})\n`;
+      });
+      return text;
+    };
+
+    const page = searchSessions.get(sessionId);
+    await ctx.reply(buildPage(page), {
+      reply_markup: {
+        inline_keyboard: [
+          page.results.slice(0, PAGE_SIZE).map((_, i) => ({
+            text: `${i + 1}`,
+            callback_data: `detail:${sessionId}:${i}`
+          })),
+          [
+            { text: '上一页', callback_data: `prev:${sessionId}` },
+            { text: '下一页', callback_data: `next:${sessionId}` }
+          ]
+        ]
+      }
+    });
+
+  } catch (err) {
+    logErr('模糊搜索错误:', err);
+    ctx.reply('⚠️ 搜索出错，请稍后再试');
+  }
+});
+
+// ========== 分页和详情回调 ==========
+bot.action(/detail:(.+):(\d+)/, async ctx => {
+  const [ , sessionId, indexStr ] = ctx.match;
+  const session = searchSessions.get(sessionId);
+  if (!session) return ctx.answerCbQuery('⚠️ 会话已过期');
+
+  const index = parseInt(indexStr);
+  const item = session.results[(session.page -1)* PAGE_SIZE + index];
+  if (!item) return ctx.answerCbQuery('⚠️ 无效索引');
+
+  const { doc, name } = item;
+  const message = buildMessage(doc, name);
+  const imageUrl = doc.img?.[0] || doc.cover || await getCoverWithCache(doc.number);
+  if (imageUrl) await sendPhotoFromUrl(ctx, imageUrl, message);
+  else await ctx.reply(message, { parse_mode: 'HTML' });
+
+  await ctx.answerCbQuery();
+});
+
+bot.action(/prev:(.+)/, async ctx => {
+  const sessionId = ctx.match[1];
+  const session = searchSessions.get(sessionId);
+  if (!session) return ctx.answerCbQuery('⚠️ 会话已过期');
+  if (session.page <= 1) return ctx.answerCbQuery('⚠️ 已经是第一页');
+  session.page--;
+  await ctx.editMessageText(buildPage(session), {
+    reply_markup: {
+      inline_keyboard: [
+        session.results.slice((session.page-1)*PAGE_SIZE, session.page*PAGE_SIZE).map((_, i) => ({
+          text: `${i+1}`,
+          callback_data: `detail:${sessionId}:${i}`
+        })),
+        [
+          { text: '上一页', callback_data: `prev:${sessionId}` },
+          { text: '下一页', callback_data: `next:${sessionId}` }
+        ]
+      ]
+    }
+  });
+  await ctx.answerCbQuery();
+});
+
+bot.action(/next:(.+)/, async ctx => {
+  const sessionId = ctx.match[1];
+  const session = searchSessions.get(sessionId);
+  if (!session) return ctx.answerCbQuery('⚠️ 会话已过期');
+  const totalPages = Math.ceil(session.results.length / PAGE_SIZE);
+  if (session.page >= totalPages) return ctx.answerCbQuery('⚠️ 已经是最后一页');
+  session.page++;
+  await ctx.editMessageText(buildPage(session), {
+    reply_markup: {
+      inline_keyboard: [
+        session.results.slice((session.page-1)*PAGE_SIZE, session.page*PAGE_SIZE).map((_, i) => ({
+          text: `${i+1}`,
+          callback_data: `detail:${sessionId}:${i}`
+        })),
+        [
+          { text: '上一页', callback_data: `prev:${sessionId}` },
+          { text: '下一页', callback_data: `next:${sessionId}` }
+        ]
+      ]
+    }
+  });
+  await ctx.answerCbQuery();
+});
+
+
 // ========== 启动 ==========
 bot.launch().then(() => log('✅ Bot 已启动'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
