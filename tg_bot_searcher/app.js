@@ -232,7 +232,8 @@ async function sendPhotoFromUrl(ctx, url, caption) {
 bot.start(ctx => {
   if (!isAllowed(ctx.from.id)) return ctx.reply('❌ 无权限');
 
-  ctx.reply('欢迎使用全库搜索机器人！发送番号即可搜索，/start 开始。',
+  ctx.reply(
+    '欢迎使用全库搜索机器人！发送番号即可搜索，/start 开始。',
     Markup.keyboard([
       ['/a 高清中文字幕', '/a 韩国主播'],
       ['/a 素人有码系列', '/a 亚洲有码原创'],
@@ -243,6 +244,13 @@ bot.start(ctx => {
     ]).resize()
   );
 });
+
+// ========== 设置命令菜单 ==========
+bot.telegram.setMyCommands([
+  { command: 'start', description: '开始使用' },
+  { command: 'help', description: '帮助说明' },
+  { command: 'fuzzy', description: '模糊搜索（多关键词+分页）' }
+]);
 
 // ========== 推荐内容的数据库映射 ==========
 const databaseMappings = {
@@ -291,6 +299,25 @@ bot.command('a', async ctx => {
     ctx.reply('⚠️ 推荐内容出错，请稍后再试');
   }
 });
+
+function buildMessage(doc, collectionName) {
+  const number = doc.number || 'N/A';
+  const title = doc.title || 'N/A';
+  const actress = doc.actress ? doc.actress.join(', ') : '未知';
+  const release = doc.release || '未知';
+  const magnet = doc.magnet || '';
+
+  let message = `<b>${escapeHtml(title)}</b>\n`;
+  message += `番号: <code>${escapeHtml(number)}</code>\n`;
+  message += `女优: ${escapeHtml(actress)}\n`;
+  message += `发行日期: ${escapeHtml(release)}\n`;
+  message += `数据来源: ${escapeHtml(collectionName)}\n`;
+  if (magnet) {
+    message += `\n<a href="${escapeHtml(magnet)}">磁力链接</a>`;
+  }
+
+  return message;
+}
 
 // ========== 普通搜索 ==========
 bot.on('text', async ctx => {
@@ -462,6 +489,7 @@ bot.action(/next:(.+)/, async ctx => {
 bot.launch().then(() => log('✅ Bot 已启动'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
