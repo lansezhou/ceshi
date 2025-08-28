@@ -453,6 +453,164 @@ bot.action(/prev:(.+)/, async ctx => {
   await ctx.editMessageText(buildPage(session), {
     reply_markup: {
       inline_keyboard: [
+// ========================= 构建消息 =========================
+function buildMessage(doc, collectionName) {
+  const number = doc.number || 'N/A';
+  const title = doc.title || 'N/A';
+  const actress = doc.actress ? doc.actress.join(', ') : '未知';
+  const release = doc.release || '未知';
+  const magnet = doc.magnet || doc.magnet_link || ''; // 支持多种磁链字段
+
+  let message = `<b>${escapeHtml(title)}</b>\n`;
+  message += `番号: <code>${escapeHtml(number)}</code>\n`;
+  message += `女优: ${escapeHtml(actress)}\n`;
+  message += `发行日期: ${escapeHtml(release)}\n`;
+  message += `数据来源: ${escapeHtml(collectionName)}\n`;
+  if (magnet) {
+    message += `\n<a href="${escapeHtml(magnet)}">磁力链接</a>`;
+  }
+  return message;
+}
+
+// ========================= 普通搜索 =========================
+bot.on('text', async ctx => {
+  const userId = ctx.from.id;
+  if (!isAllowed(userId)) return;
+  const text = ctx.message.text.trim();
+  if (!text || text.startsWith('/') || text.length > 50) return;
+
+  log(`🔎 用户 ${userId} 搜索: ${text}`);
+  try {
+    await connectDB();
+    ctx.sendChatAction('typing');
+
+    const results = await searchAllCollections(text);
+    if (!results.length) {
+      const fallbackMsg = `<b>ℹ️ 找到番号: ${escapeHtml(text)}</b>\n❌ 本地未找到`;
+      const imageUrl = await getCoverWithCache(text);
+      if (imageUrl) await sendPhotoFromUrl(ctx, imageUrl, fallbackMsg);
+      else await ctx.reply(fallbackMsg, { parse_mode: 'HTML' });
+      return;
+    }
+
+    for (const { doc, name } of results) {
+      const message = buildMessage(doc, name);
+      const imageUrl = doc.img?.[0] || doc.cover || await getCoverWithCache(text);
+      if (imageUrl) {
+        if (await validateImageUrl(imageUrl)) {
+          try { await ctx.replyWithPhoto(imageUrl, { caption: message, parse_mode: 'HTML' }); }
+          catch { await sendPhotoFromUrl(ctx, imageUrl, message); }
+        } else {
+          await sendPhotoFromUrl(ctx, imageUrl, message);
+        }
+      } else {
+        await ctx.reply(message, { parse_mode: 'HTML' });
+      }
+    }
+
+  } catch (err) {
+    logErr('搜索错误:', err);
+    ctx.reply('⚠️ 搜索出错，请稍后再试');
+  }
+});
+
+// ========================= 多关键词模糊搜索 + 分页 =========================
+const { nanoid } = require('nanoid');
+const searchSessions = new Map();
+const PAGE_SIZE = 5;
+
+function buildPage(session) {
+  const start = (session.page - 1) * PAGE_SIZE;
+  const pageItems = session.results.slice(start, start + PAGE_SIZE);
+  let text = `ℹ️ 共 ${session.results.length} 条结果，当前第 ${session.page} 页\n\n`;
+  pageItems.forEach((item, i) => {
+    const number = item.doc.number || 'N/A';
+    const title = item.doc.title || 'N/A';
+    text += `${i + 1}. ${title} (${number})\n`;
+  });
+  return text;
+}
+
+bot.command('fuzzy', async ctx => {
+  if (!isAllowed(ctx.from.id)) return ctx.reply('❌ 无权限');
+
+  const keyword = ctx.message.text.replace('/fuzzy', '').trim();
+  if (!keyword) return ctx.reply('用法: /fuzzy <关键词>, 支持空格分隔多个关键词');
+
+  try {
+    await connectDB();
+    ctx.sendChatAction('typing');
+
+    const keywords = keyword.split(/\s+/).filter(Boolean);
+    const regexConditions = keywords.map(k => ({
+      $or: [
+        { title: { $regex: k, $options: 'i' } },
+        { number: { $regex: k, $options: 'i' } } // 支持番号模糊搜索
+      ]
+    }));
+
+    const collections = await getAllCollections();
+    let results = [];
+    for (const name of collections) {
+      try {
+        const docs = await db.collection(name).find({ $and: regexConditions }).toArray();
+        results.push(...docs.map(doc => ({ doc, name })));
+      } catch (err) { logErr(`❌ 搜索集合 ${name} 出错:`, err.message); }
+    }
+
+    if (!results.length) return ctx.reply('❌ 未找到匹配结果');
+
+    // 分页处理
+    const sessionId = nanoid();
+    searchSessions.set(sessionId, { results, page: 1 });
+    const session = searchSessions.get(sessionId);
+
+    await ctx.reply(buildPage(session), {
+      reply_markup: {
+        inline_keyboard: [
+          session.results.slice(0, PAGE_SIZE).map((_, i) => ({ text: `${i+1}`, callback_data: `detail:${sessionId}:${i}` })),
+          [
+            { text: '上一页', callback_data: `prev:${sessionId}` },
+            { text: '下一页', callback_data: `next:${sessionId}` }
+          ]
+        ]
+      }
+    });
+
+  } catch (err) {
+    logErr('模糊搜索错误:', err);
+    ctx.reply('⚠️ 搜索出错，请稍后再试');
+  }
+});
+
+// ========================= 分页与详情回调 =========================
+bot.action(/detail:(.+):(\d+)/, async ctx => {
+  const [ , sessionId, indexStr ] = ctx.match;
+  const session = searchSessions.get(sessionId);
+  if (!session) return ctx.answerCbQuery('⚠️ 会话已过期');
+
+  const index = parseInt(indexStr);
+  const item = session.results[(session.page -1)* PAGE_SIZE + index];
+  if (!item) return ctx.answerCbQuery('⚠️ 无效索引');
+
+  const { doc, name } = item;
+  const message = buildMessage(doc, name);
+  const imageUrl = doc.img?.[0] || doc.cover || await getCoverWithCache(doc.number);
+  if (imageUrl) await sendPhotoFromUrl(ctx, imageUrl, message);
+  else await ctx.reply(message, { parse_mode: 'HTML' });
+
+  await ctx.answerCbQuery();
+});
+
+bot.action(/prev:(.+)/, async ctx => {
+  const sessionId = ctx.match[1];
+  const session = searchSessions.get(sessionId);
+  if (!session) return ctx.answerCbQuery('⚠️ 会话已过期');
+  if (session.page <= 1) return ctx.answerCbQuery('⚠️ 已经是第一页');
+  session.page--;
+  await ctx.editMessageText(buildPage(session), {
+    reply_markup: {
+      inline_keyboard: [
         session.results.slice((session.page-1)*PAGE_SIZE, session.page*PAGE_SIZE).map((_, i) => ({ text: `${i+1}`, callback_data: `detail:${sessionId}:${i}` })),
         [
           { text: '上一页', callback_data: `prev:${sessionId}` },
@@ -489,6 +647,7 @@ bot.action(/next:(.+)/, async ctx => {
 bot.launch().then(() => log('✅ Bot 已启动'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
