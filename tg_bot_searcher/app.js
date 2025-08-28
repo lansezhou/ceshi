@@ -7,6 +7,9 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 
+// ========== 环境变量配置 ==========
+const COVER_WORKER_URL = process.env.COVER_WORKER_URL || null;
+
 // ========== runtime.json 持久化 ==========
 const runtimeFile = path.join(__dirname, 'config', 'runtime.json');
 let runtimeConfig = { defaultSaveDir: config.defaultSaveDir };
@@ -64,6 +67,15 @@ if (fs.existsSync(CACHE_FILE)) {
 }
 
 function saveCache() {
+  const MAX_CACHE_SIZE = 1000;
+  if (coverCache.size > MAX_CACHE_SIZE) {
+    const entries = Array.from(coverCache.entries());
+    entries.sort((a, b) => a[1].time - b[1].time);
+    for (let i = 0; i < entries.length - MAX_CACHE_SIZE; i++) {
+      coverCache.delete(entries[i][0]);
+    }
+  }
+  
   fs.writeFileSync(CACHE_FILE, JSON.stringify(Object.fromEntries(coverCache), null, 2));
 }
 
@@ -87,6 +99,10 @@ function isAllowed(userId) {
 function escapeHtml(text) {
   if (!text) return 'N/A';
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function sanitizeInput(text) {
+  return text.trim().substring(0, 50).replace(/[^a-zA-Z0-9\-_]/g, '');
 }
 
 async function connectDB() {
@@ -144,14 +160,35 @@ async function validateImageUrl(url) {
   }
 }
 
-// 封面获取函数
+// 修改后的Worker封面获取函数
 async function getWorkerCover(number) {
-  try {
-    const url = `https://tuymawvla.allixogiqs79.workers.dev/${encodeURIComponent(number)}`;
-    const resp = await axios.get(url, { timeout: 5000 });
-    if (resp.data && typeof resp.data === 'string' && resp.data.startsWith('http')) return resp.data;
+  // 如果没有配置环境变量，直接返回null
+  if (!COVER_WORKER_URL) {
     return null;
-  } catch {
+  }
+  
+  try {
+    let url;
+    if (COVER_WORKER_URL.includes('{number}')) {
+      url = COVER_WORKER_URL.replace('{number}', encodeURIComponent(number));
+    } else {
+      url = `${COVER_WORKER_URL}/${encodeURIComponent(number)}`;
+    }
+    
+    const resp = await axios.get(url, { timeout: 5000 });
+    
+    if (resp.data) {
+      if (typeof resp.data === 'string' && resp.data.startsWith('http')) {
+        return resp.data;
+      } else if (typeof resp.data === 'object' && resp.data.url) {
+        return resp.data.url;
+      } else if (typeof resp.data === 'object' && resp.data.imageUrl) {
+        return resp.data.imageUrl;
+      }
+    }
+    return null;
+  } catch (error) {
+    logErr('Worker封面获取失败:', error.message);
     return null;
   }
 }
@@ -200,18 +237,38 @@ async function getDmmCover(number) {
 }
 
 // ========== 封面抓取带缓存 & 多源优选 ==========
-async function getCoverWithCache(number) {
+async function getCoverWithCache(number, retries = 2) {
   cleanExpiredCache();
   const cached = coverCache.get(number);
   if (cached && Date.now() - cached.time < COVER_TTL) return cached.url;
 
-  const sources = [getWorkerCover, getDmmCover, getJavDbCover, getSehuatangCover];
+  // 根据是否配置了环境变量调整源优先级
+  const sources = [];
+  
+  if (COVER_WORKER_URL) {
+    sources.push(getWorkerCover); // 如果配置了环境变量，优先使用
+  }
+  
+  // 添加其他源
+  sources.push(getDmmCover, getJavDbCover, getSehuatangCover);
+  
+  // 如果没有配置环境变量，调整优先级
+  if (!COVER_WORKER_URL) {
+    sources.unshift(getJavDbCover); // 将javdb提到前面
+  }
+
   const results = await Promise.all(sources.map(fn => fn(number)));
-  const cover = results.find(url => url);
+  const cover = results.find(url => url && url !== '');
+  
   if (cover && await validateImageUrl(cover)) {
     coverCache.set(number, { url: cover, time: Date.now() });
     saveCache();
     return cover;
+  }
+
+  if (!cover && retries > 0) {
+    log(`🔄 封面获取失败，重试中: ${number} (${retries}次剩余)`);
+    return getCoverWithCache(number, retries - 1);
   }
 
   log(`❌ 未获取到有效封面: ${number}`);
@@ -221,6 +278,27 @@ async function getCoverWithCache(number) {
 // ========== 本地发送封面 ==========
 const tmpDir = path.join(__dirname, 'tmp');
 fs.mkdirSync(tmpDir, { recursive: true });
+
+function cleanTmpDir() {
+  fs.readdir(tmpDir, (err, files) => {
+    if (err) return;
+    const now = Date.now();
+    files.forEach(file => {
+      const filePath = path.join(tmpDir, file);
+      try {
+        const stat = fs.statSync(filePath);
+        if (now - stat.mtimeMs > 60 * 60 * 1000) {
+          fs.unlinkSync(filePath);
+        }
+      } catch (e) {
+        // 忽略错误
+      }
+    });
+  });
+}
+
+setInterval(cleanTmpDir, 60 * 60 * 1000);
+
 async function sendPhotoFromUrl(ctx, url, caption) {
   try {
     const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': url } });
@@ -236,23 +314,6 @@ async function sendPhotoFromUrl(ctx, url, caption) {
   }
 }
 
-// ========== 启动命令 ==========
-bot.start(ctx => {
-  if (!isAllowed(ctx.from.id)) return ctx.reply('❌ 无权限');
-
-  ctx.reply('欢迎使用全库搜索机器人！发送番号即可搜索，/start 开始。',
-    Markup.keyboard([
-      
-      ['/a 高清中文字幕', '/a 韩国主播'], // 添加快捷方式
-      ['/a 素人有码系列', '/a 亚洲有码原创'],
-      ['/a 亚洲无码原创', '/a 动漫原创'],
-      ['/a VR', '/a 4K'],
-      ['/a 国产原创', '/a 欧美无码'],
-      ['/a 三级写真', '/a 其他']
-    ]).resize()
-  );
-});
-
 // ========== 推荐内容的数据库映射 ==========
 const databaseMappings = {
   '高清中文字幕': 'hd_chinese_subtitles',
@@ -263,62 +324,115 @@ const databaseMappings = {
   'VR': 'vr_video',
   '4K': '4k_video',
   '国产原创': 'domestic_original',
-  '欧美无码': 'asia_codeless_originate', // 如果有对应数据库，请替换
+  '欧美无码': 'european_american_no_mosaic',
   '三级写真': 'three_levels_photo',
-  '韩国主播': 'vegan_with_mosaic', // 如果有对应数据库，请替换
+  '韩国主播': 'korean_anchor',
+  '其他': 'other_collections'
 };
 
-// ========== 随机推荐内容 ==========
-bot.command('a', async ctx => {
-  if (!isAllowed(ctx.from.id)) return ctx.reply('❌ 无权限');
-
-  const args = ctx.message.text.split(' ').slice(1);
-  if (args.length !== 1) {
-    return ctx.reply('用法: /a <内容>，例如: /a 韩国主播');
-  }
-
-  const contentName = args[0];
-  const recommendedCollection = Object.keys(databaseMappings).find(key => key.includes(contentName));
-
-  if (!recommendedCollection) {
-    return ctx.reply('❌ 无效的内容，请使用以下内容之一：' + Object.keys(databaseMappings).join(', '));
-  }
-
+// ========== 统一处理分类推荐 ==========
+async function handleCategoryRecommendation(ctx, category) {
   try {
     await connectDB();
-    const results = await db.collection(databaseMappings[recommendedCollection]).aggregate([{ $sample: { size: 10 } }]).toArray();
+    const collectionName = databaseMappings[category];
+    
+    if (!collectionName) {
+      return ctx.reply('❌ 无效的分类');
+    }
+
+    const loadingMsg = await ctx.reply(`🔄 正在获取【${category}】推荐...`);
+    
+    const results = await db.collection(collectionName)
+      .aggregate([{ $sample: { size: 10 } }])
+      .toArray();
 
     if (results.length > 0) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+      
+      await ctx.reply(`🎉 为您推荐【${category}】内容（${results.length}条）：`);
+      
       for (const doc of results) {
         const number = escapeHtml(doc.number || 'N/A');
+        const title = escapeHtml(doc.title || '无标题');
         const magnet = escapeHtml(doc.magnet || 'N/A');
         
-        // 通过番号获取封面
-        const imageUrl = await getCoverWithCache(number); 
+        const imageUrl = await getCoverWithCache(number);
+        const message = `<b>${category}推荐</b>\n\n<b>标题:</b> ${title}\n<b>番号:</b> ${number}\n<b>磁力链接:</b> <code>${magnet}</code>`;
 
-        const message = `<b>番号:</b> ${number}\n<b>磁力链接:</b> <code>${magnet}</code>\n\n`;
-
-        // 发送封面图片
         if (imageUrl) {
           await sendPhotoFromUrl(ctx, imageUrl, message);
         } else {
           await ctx.reply(message, { parse_mode: 'HTML' });
         }
+        
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
     } else {
-      ctx.reply(`❌ ${recommendedCollection} 内容为空`);
+      await ctx.reply(`❌ 【${category}】内容为空或未找到数据`);
     }
   } catch (err) {
     logErr('推荐错误:', err);
-    ctx.reply('⚠️ 推荐内容出错，请稍后再试');
+    ctx.reply('⚠️ 获取推荐内容出错，请稍后再试');
   }
+}
+
+// ========== 启动命令 ==========
+bot.start(ctx => {
+  if (!isAllowed(ctx.from.id)) return ctx.reply('❌ 无权限');
+
+  const menuCommands = Object.keys(databaseMappings).map(category => ({
+    command: `a_${category}`,
+    description: category
+  }));
+
+  bot.telegram.setMyCommands(menuCommands);
+  
+  ctx.reply('欢迎使用全库搜索机器人！\n\n使用说明：\n• 发送番号即可搜索\n• 使用左侧菜单选择分类推荐\n• 点击"/"查看所有可用命令',
+    Markup.keyboard([
+      ['📋 查看所有命令'],
+      ['🔍 搜索帮助']
+    ]).resize()
+  );
 });
 
-// ========== 搜索 ==========
+// ========== 帮助命令 ==========
+bot.command('help', ctx => {
+  if (!isAllowed(ctx.from.id)) return ctx.reply('❌ 无权限');
+  
+  let helpText = '📋 <b>可用命令：</b>\n\n';
+  helpText += '• 直接发送番号 - 搜索资源\n';
+  helpText += '• /start - 开始使用\n';
+  helpText += '• /help - 显示帮助\n\n';
+  
+  helpText += '🎯 <b>分类推荐命令：</b>\n';
+  Object.keys(databaseMappings).forEach(category => {
+    helpText += `• /a_${category} - ${category}推荐\n`;
+  });
+  
+  ctx.reply(helpText, { parse_mode: 'HTML' });
+});
+
+// ========== 处理菜单命令 ==========
+Object.keys(databaseMappings).forEach(category => {
+  bot.command(`a_${category}`, async ctx => {
+    if (!isAllowed(ctx.from.id)) return ctx.reply('❌ 无权限');
+    await handleCategoryRecommendation(ctx, category);
+  });
+});
+
+// ========== 处理文本消息 ==========
 bot.on('text', async ctx => {
   const userId = ctx.from.id;
   if (!isAllowed(userId)) return;
   const text = ctx.message.text.trim();
+  
+  if (text === '📋 查看所有命令') {
+    return ctx.reply('请输入 /help 查看所有可用命令');
+  }
+  if (text === '🔍 搜索帮助') {
+    return ctx.reply('直接在聊天框中输入番号即可搜索，例如：ABP-123');
+  }
+  
   if (!text || text.startsWith('/') || text.length > 50) return;
 
   log(`🔎 用户 ${userId} 搜索: ${text}`);
@@ -326,9 +440,14 @@ bot.on('text', async ctx => {
   try {
     await connectDB();
     ctx.sendChatAction('typing');
-    const results = await searchAllCollections(text);
+    let results = await searchAllCollections(text);
 
     if (results.length > 0) {
+      if (results.length > 5) {
+        await ctx.reply(`找到 ${results.length} 条结果，只显示前5条...`);
+        results = results.slice(0, 5);
+      }
+
       for (const { doc, name } of results) {
         const message = buildMessage(doc, name);
         const imageUrl = doc.img?.[0] || doc.cover || await getCoverWithCache(text);
@@ -359,7 +478,33 @@ bot.on('text', async ctx => {
   }
 });
 
+// ========== 错误处理 ==========
+bot.catch((err, ctx) => {
+  logErr('Bot 错误:', err);
+  ctx.reply('❌ 发生错误，请稍后再试');
+});
+
+// ========== 优雅关闭 ==========
+process.once('SIGINT', async () => {
+  await bot.stop('SIGINT');
+  await client.close();
+  logStream.end();
+  process.exit(0);
+});
+
+process.once('SIGTERM', async () => {
+  await bot.stop('SIGTERM');
+  await client.close();
+  logStream.end();
+  process.exit(0);
+});
+
 // ========== 启动 ==========
-bot.launch().then(() => log('✅ Bot 已启动'));
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+bot.launch().then(() => {
+  log('✅ Bot 已启动');
+  if (COVER_WORKER_URL) {
+    log(`✅ 已配置Worker封面服务: ${COVER_WORKER_URL}`);
+  } else {
+    log('ℹ️ 未配置Worker封面服务，将使用备用源获取封面');
+  }
+});
