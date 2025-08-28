@@ -163,8 +163,18 @@ async function validateImageUrl(url) {
 async function getWorkerCover(number) {
   if (!COVER_WORKER_URL) return null;
   try {
-    let url = COVER_WORKER_URL.includes('{number}') ? COVER_WORKER_URL.replace('{number}', encodeURIComponent(number)) : `${COVER_WORKER_URL}/${encodeURIComponent(number)}`;
-    const resp = await axios.get(url, { timeout: 5000 });
+    let url = COVER_WORKER_URL.includes('{number}') 
+      ? COVER_WORKER_URL.replace('{number}', encodeURIComponent(number)) 
+      : `${COVER_WORKER_URL}/${encodeURIComponent(number)}`;
+
+    const resp = await axios.get(url, { 
+      timeout: 5000, 
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Referer': COVER_WORKER_URL
+      }
+    });
+
     if (resp.data) {
       if (typeof resp.data === 'string' && resp.data.startsWith('http')) return resp.data;
       if (typeof resp.data === 'object' && resp.data.url) return resp.data.url;
@@ -248,7 +258,15 @@ fs.mkdirSync(tmpDir, { recursive: true });
 
 async function sendPhotoFromUrl(ctx, url, caption) {
   try {
-    const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': url } });
+    const resp = await axios.get(url, { 
+      responseType: 'arraybuffer', 
+      timeout: 10000, 
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Referer': COVER_WORKER_URL || url
+      }
+    });
+
     const ext = (url.match(/\.(jpg|jpeg|png|gif)/i) || ['.jpg'])[0];
     const tmpPath = path.join(tmpDir, `cover_${Date.now()}${ext}`);
     fs.writeFileSync(tmpPath, resp.data);
@@ -462,6 +480,7 @@ bot.launch().then(() => {
     log('ℹ️ 未配置Worker封面服务，将使用备用源获取封面');
   }
 });
+
 
 
 
