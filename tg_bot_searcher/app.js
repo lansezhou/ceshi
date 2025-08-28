@@ -316,28 +316,50 @@ async function sendPhotoFromUrl(ctx, url, caption) {
 
 // ========== 推荐内容的数据库映射 ==========
 const databaseMappings = {
-  '高清中文字幕': 'hd_chinese_subtitles',
-  '素人有码系列': 'EU_US_no_mosaic',
-  '亚洲有码原创': 'asia_codeless_originate',
-  '亚洲无码原创': 'asia_mosaic_originate',
-  '动漫原创': 'online_originate',
-  'VR': 'vr_video',
-  '4K': '4k_video',
-  '国产原创': 'domestic_original',
-  '欧美无码': 'european_american_no_mosaic',
-  '三级写真': 'three_levels_photo',
-  '韩国主播': 'korean_anchor',
-  '其他': 'other_collections'
+  'a_hd_chinese': 'hd_chinese_subtitles',
+  'a_amateur': 'EU_US_no_mosaic',
+  'a_asia_censored': 'asia_codeless_originate',
+  'a_asia_uncensored': 'asia_mosaic_originate',
+  'a_anime': 'online_originate',
+  'a_vr': 'vr_video',
+  'a_4k': '4k_video',
+  'a_domestic': 'domestic_original',
+  'a_eu_us': 'european_american_no_mosaic',
+  'a_three_level': 'three_levels_photo',
+  'a_korean': 'korean_anchor',
+  'a_other': 'other_collections'
+};
+
+// ========== 命令处理器映射 ==========
+const commandHandlers = {
+  'a_hd_chinese': '高清中文字幕',
+  'a_amateur': '素人有码系列',
+  'a_asia_censored': '亚洲有码原创',
+  'a_asia_uncensored': '亚洲无码原创',
+  'a_anime': '动漫原创',
+  'a_vr': 'VR',
+  'a_4k': '4K',
+  'a_domestic': '国产原创',
+  'a_eu_us': '欧美无码',
+  'a_three_level': '三级写真',
+  'a_korean': '韩国主播',
+  'a_other': '其他'
 };
 
 // ========== 统一处理分类推荐 ==========
 async function handleCategoryRecommendation(ctx, category) {
   try {
     await connectDB();
-    const collectionName = databaseMappings[category];
     
-    if (!collectionName) {
+    // 获取命令键
+    const commandKey = Object.keys(commandHandlers).find(key => commandHandlers[key] === category);
+    if (!commandKey) {
       return ctx.reply('❌ 无效的分类');
+    }
+    
+    const collectionName = databaseMappings[commandKey];
+    if (!collectionName) {
+      return ctx.reply('❌ 未找到对应的数据集合');
     }
 
     const loadingMsg = await ctx.reply(`🔄 正在获取【${category}】推荐...`);
@@ -380,10 +402,21 @@ async function handleCategoryRecommendation(ctx, category) {
 bot.start(ctx => {
   if (!isAllowed(ctx.from.id)) return ctx.reply('❌ 无权限');
 
-  const menuCommands = Object.keys(databaseMappings).map(category => ({
-    command: `a_${category}`,
-    description: category
-  }));
+  // 创建有效的命令名称（只使用英文和数字）
+  const menuCommands = [
+    { command: 'a_hd_chinese', description: '高清中文字幕' },
+    { command: 'a_amateur', description: '素人有码系列' },
+    { command: 'a_asia_censored', description: '亚洲有码原创' },
+    { command: 'a_asia_uncensored', description: '亚洲无码原创' },
+    { command: 'a_anime', description: '动漫原创' },
+    { command: 'a_vr', description: 'VR' },
+    { command: 'a_4k', description: '4K' },
+    { command: 'a_domestic', description: '国产原创' },
+    { command: 'a_eu_us', description: '欧美无码' },
+    { command: 'a_three_level', description: '三级写真' },
+    { command: 'a_korean', description: '韩国主播' },
+    { command: 'a_other', description: '其他' }
+  ];
 
   bot.telegram.setMyCommands(menuCommands);
   
@@ -405,18 +438,18 @@ bot.command('help', ctx => {
   helpText += '• /help - 显示帮助\n\n';
   
   helpText += '🎯 <b>分类推荐命令：</b>\n';
-  Object.keys(databaseMappings).forEach(category => {
-    helpText += `• /a_${category} - ${category}推荐\n`;
+  Object.entries(commandHandlers).forEach(([command, description]) => {
+    helpText += `• /${command} - ${description}推荐\n`;
   });
   
   ctx.reply(helpText, { parse_mode: 'HTML' });
 });
 
 // ========== 处理菜单命令 ==========
-Object.keys(databaseMappings).forEach(category => {
-  bot.command(`a_${category}`, async ctx => {
+Object.keys(commandHandlers).forEach(command => {
+  bot.command(command, async ctx => {
     if (!isAllowed(ctx.from.id)) return ctx.reply('❌ 无权限');
-    await handleCategoryRecommendation(ctx, category);
+    await handleCategoryRecommendation(ctx, commandHandlers[command]);
   });
 });
 
